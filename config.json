@@ -1,0 +1,10 @@
+{
+  "video_source": 0,
+  "line_coords": [100, 100, 600, 100],
+  "zone_coords": [[200, 200], [600, 200], [600, 400], [200, 400]],
+  "detection_confidence": 0.5,
+  "tracking_max_distance": 50,
+  "api_port": 8000,
+  "database_path": "events.db",
+  "event_retention_days": 7
+}

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PheNex - AI Video Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎯 PheNex - AI Video Analytics Platform</h1>
+            <div class="status">
+                <span id="api-status">API: Connecting...</span>
+                <span id="ws-status">WebSocket: Connecting...</span>
+                <span id="video-status">Video: Streaming...</span>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Video Stream -->
+            <section class="panel video-panel">
+                <h2>📹 Live Stream</h2>
+                <div class="video-container">
+                    <img id="video-stream" src="/video_feed" alt="Video Stream" />
+                </div>
+            </section>
+
+            <!-- Stats Panel -->
+            <section class="panel stats-panel">
+                <h2>📊 Statistics</h2>
+                <div class="stat-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-events">0</div>
+                        <div class="stat-label">Total Events</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="total-objects">0</div>
+                        <div class="stat-label">Objects</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="line-crossings">0</div>
+                        <div class="stat-label">Line Crossings</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="zone-entries">0</div>
+                        <div class="stat-label">Zone Entries</div>
+                    </div>
+                </div>
+                <canvas id="eventChart" style="max-height: 200px;"></canvas>
+            </section>
+
+            <!-- Alerts -->
+            <section class="panel alerts-panel">
+                <h2>🚨 Recent Alerts</h2>
+                <div id="alerts-container" class="alerts-list">
+                    <p class="empty-state">No alerts yet</p>
+                </div>
+            </section>
+
+            <!-- Event Log -->
+            <section class="panel events-panel">
+                <h2>📋 Event Log</h2>
+                <div id="events-container" class="events-list">
+                    <p class="empty-state">No events yet</p>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="static/app.js"></script>
+</body>
+</html>

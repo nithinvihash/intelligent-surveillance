@@ -1,11 +1,26 @@
-import cv2
-from ultralytics import YOLO
+import importlib
 import time
 import warnings
 warnings.filterwarnings('ignore')
+
+try:
+    cv2 = importlib.import_module("cv2")
+except ImportError as exc:
+    raise ImportError(
+        "The 'opencv-python' package is required. Install it with "
+        "'python -m pip install opencv-python'."
+    ) from exc
+
 class Detector:
     def __init__(self):
         print("Loading YOLOv8n model...")
+        try:
+            YOLO = importlib.import_module("ultralytics").YOLO
+        except ImportError as exc:
+            raise ImportError(
+                "The 'ultralytics' package is required. Install it with "
+                "'python -m pip install ultralytics'."
+            ) from exc
         self.model = YOLO('yolov8n.pt')
         print("✓ Model loaded!")
     

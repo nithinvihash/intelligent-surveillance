@@ -1,4 +1,4 @@
-import cv2
+import importlib
 import time
 import threading
 import asyncio
@@ -8,6 +8,10 @@ from tracker import Tracker
 from events import EventGenerator
 from storage import EventDatabase
 from config import Config
+
+# Load OpenCV dynamically so static analysis does not require the optional
+# cv2 type stubs to be installed in the selected Python environment.
+cv2 = importlib.import_module("cv2")
 
 # Load configuration before making it available to the API module.
 with open("config.json", "r", encoding="utf-8") as f:
@@ -51,96 +55,109 @@ class PipelineRunner:
         self.frame_count = 0
     
     def run_detection_loop(self):
-        """Main detection loop with error handling"""
-        cap = None
-        reconnect_attempts = 0
-        max_reconnect_attempts = 5
-        self.start_time = time.time()
-        
-        while self.running:
-            try:
-                if cap is None or not cap.isOpened():
-                    print(f"Opening video source: {self.video_source}")
-                    cap = cv2.VideoCapture(self.video_source)
-                    
-                    if not cap.isOpened():
-                        reconnect_attempts += 1
-                        if reconnect_attempts > max_reconnect_attempts:
-                            logger.error("MAX RECONNECTION ATTEMPTS EXCEEDED")
-                            break
+            """Main detection loop with error handling"""
+            cap = None
+            reconnect_attempts = 0
+            max_reconnect_attempts = 5
+            self.start_time = time.time()
+            
+            while self.running:
+                try:
+                    if cap is None or not cap.isOpened():
+                        print(f"Opening video source: {self.video_source}")
+                        cap = cv2.VideoCapture(self.video_source)
                         
-                        wait_time = min(2 ** reconnect_attempts, 30)  # Exponential backoff
-                        logger.warning(f"Failed to open camera. Retry in {wait_time}s (attempt {reconnect_attempts}/{max_reconnect_attempts})")
-                        time.sleep(wait_time)
+                        if not cap.isOpened():
+                            reconnect_attempts += 1
+                            if reconnect_attempts > max_reconnect_attempts:
+                                logger.error("MAX RECONNECTION ATTEMPTS EXCEEDED")
+                                break
+                            
+                            wait_time = min(2 ** reconnect_attempts, 30)  # Exponential backoff
+                            logger.warning(f"Failed to open camera. Retry in {wait_time}s (attempt {reconnect_attempts}/{max_reconnect_attempts})")
+                            time.sleep(wait_time)
+                            continue
+                        
+                        reconnect_attempts = 0  # Reset on successful connection
+                        logger.info("[OK] Camera connected")
+                    
+                    # Read frame with timeout
+                    ret, frame = cap.read()
+                    if not ret:
+                        logger.warning("Failed to read frame, attempting reconnection...")
+                        cap.release()
+                        cap = None
                         continue
                     
-                    reconnect_attempts = 0  # Reset on successful connection
-                    logger.info("✓ Camera connected")
-                
-                # Read frame with timeout
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Failed to read frame, attempting reconnection...")
-                    cap.release()
-                    cap = None
-                    continue
-                
-                # Process frame
-                try:
-                    frame_small = cv2.resize(frame, (480, 360))
-                    detections = self.detector.detect(frame_small)
-                    tracks = self.tracker.update(detections)
-                    events = self.event_gen.generate_events(tracks)
+                    # Process frame
+                    try:
+                        detection_interval = 3
+                        frame_count = 0
+                        last_detections = []
+    
+                        width = self.config.get('frame_width', 480)
+                        height = self.config.get('frame_height', 360)
+                        frame_small = cv2.resize(frame, (width, height))
+    
+                        if frame_count % detection_interval == 0:
+                            detections = self.detector.detect(frame_small)
+                            last_detections = detections
+                        else:
+                            detections = last_detections
+                        frame_count += 1
+                        
+                        tracks = self.tracker.update(detections)
+                        events = self.event_gen.generate_events(tracks)
+                        
+                        # Store events
+                        for event in events:
+                            try:
+                                self.db.store_event(event)
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                loop.run_until_complete(broadcast_event(event))
+                            except Exception as e:
+                                logger.error(f"Failed to store event: {e}")
+                        
+                        # Draw and update
+                        frame_small = self.detector.draw_boxes(frame_small, detections)
+                        frame_small = self.tracker.draw_tracks(frame_small, tracks)
+                        frame_small = self.event_gen.draw_zones_and_lines(frame_small)
+                        
+                        self.frame_count += 1
+                        elapsed = time.time() - self.start_time
+                        self.fps = self.frame_count / elapsed
+                        
+                        cv2.putText(frame_small, f"FPS: {self.fps:.1f}", (10, 30),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        
+                        update_frame(frame_small)
+                        
+                        if self.frame_count % 30 == 0:
+                            stats = self.db.get_stats()
+                            logger.info(f"Frame {self.frame_count} | FPS: {self.fps:.1f} | Tracks: {len(tracks)} | Events: {stats['total_events']}")
+                        
+                        # Periodic cleanup
+                        if self.frame_count % (1800 * 20) == 0:
+                            deleted = self.db.cleanup_old_events(days=7)
+                            logger.info(f"Cleanup: deleted {deleted} old events")
+                        
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
                     
-                    # Store events
-                    for event in events:
-                        try:
-                            self.db.store_event(event)
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(broadcast_event(event))
-                        except Exception as e:
-                            logger.error(f"Failed to store event: {e}")
-                    
-                    # Draw and update
-                    frame_small = self.detector.draw_boxes(frame_small, detections)
-                    frame_small = self.tracker.draw_tracks(frame_small, tracks)
-                    frame_small = self.event_gen.draw_zones_and_lines(frame_small)
-                    
-                    self.frame_count += 1
-                    elapsed = time.time() - self.start_time
-                    self.fps = self.frame_count / elapsed
-                    
-                    cv2.putText(frame_small, f"FPS: {self.fps:.1f}", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    update_frame(frame_small)
-                    
-                    if self.frame_count % 30 == 0:
-                        stats = self.db.get_stats()
-                        logger.info(f"Frame {self.frame_count} | FPS: {self.fps:.1f} | Tracks: {len(tracks)} | Events: {stats['total_events']}")
-                    
-                    # Periodic cleanup
-                    if self.frame_count % (1800 * 20) == 0:
-                        deleted = self.db.cleanup_old_events(days=7)
-                        logger.info(f"Cleanup: deleted {deleted} old events")
-                    
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                    except Exception as e:
+                        logger.error(f"Frame processing error: {e}", exc_info=True)
+                        continue
                 
                 except Exception as e:
-                    logger.error(f"Frame processing error: {e}", exc_info=True)
-                    continue
+                    logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+                    time.sleep(2)
             
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                time.sleep(2)
-        
-        if cap:
-            cap.release()
-        cv2.destroyAllWindows()
-        self.db.close()
-        logger.info("Pipeline stopped")
+            if cap:
+                cap.release()
+            cv2.destroyAllWindows()
+            self.db.close()
+            logger.info("Pipeline stopped")
     
     def start_api_server(self):
         """Start FastAPI server"""

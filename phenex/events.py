@@ -116,16 +116,17 @@ class EventGenerator:
     def _line_crossed(self, p1, p2):
         """Check if line segment p1-p2 crosses the defined line"""
         x1, y1, x2, y2 = self.line
+
+        def ccw(A, B, C):
+            """Check if points A, B, C are in counter-clockwise order"""
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+        line_p1 = (x1, y1)
+        line_p2 = (x2, y2)
+
+        return ccw(p1, line_p1, line_p2) != ccw(p2, line_p1, line_p2) and \
+               ccw(p1, p2, line_p1) != ccw(p1, p2, line_p2)
         
-        # Simple version: check y-coordinate crossing for horizontal line
-        prev_y = p1[1]
-        curr_y = p2[1]
-        line_y = y1
-        
-        # Crossed if changed from above to below (or vice versa)
-        return (prev_y < line_y and curr_y >= line_y) or \
-               (prev_y >= line_y and curr_y < line_y)
-    
+      
     def _get_direction(self, p1, p2):
         """Determine crossing direction"""
         x1, y1 = p1

@@ -1,5 +1,5 @@
-import cv2
-import numpy as np
+import cv2  # type: ignore[import-not-found]
+import math
 from collections import defaultdict
 
 class Tracker:
@@ -34,8 +34,8 @@ class Tracker:
                 if det_idx in matched_detections:
                     continue
                 
-                dist = np.sqrt((last_centroid[0] - centroid[0])**2 + 
-                              (last_centroid[1] - centroid[1])**2)
+                dist = math.hypot(last_centroid[0] - centroid[0],
+                                  last_centroid[1] - centroid[1])
                 
                 if dist < best_dist and dist < self.max_distance:
                     best_dist = dist
@@ -44,6 +44,7 @@ class Tracker:
             if best_idx != -1:
                 # Update existing track
                 self.tracks[track_id]['centroid'] = new_centroids[best_idx]
+                self.tracks[track_id]['history'].append(new_centroids[best_idx])
                 self.tracks[track_id]['bbox'] = detections[best_idx]['bbox']
                 self.tracks[track_id]['age'] += 1
                 self.tracks[track_id]['class'] = detections[best_idx]['class']
@@ -92,8 +93,12 @@ class Tracker:
             
             # Draw history (last 10 positions)
             if len(track['history']) > 1:
-                pts = np.array(track['history'][-10:], dtype=np.int32)
-                cv2.polylines(frame, [pts], False, (0, 0, 255), 1)
+                history = track['history'][-10:]
+                for start, end in zip(history, history[1:]):
+                    cv2.line(frame,
+                             (int(start[0]), int(start[1])),
+                             (int(end[0]), int(end[1])),
+                             (0, 0, 255), 1)
         
         return frame
     

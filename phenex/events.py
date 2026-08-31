@@ -1,151 +1,133 @@
+import logging
 import time
-import importlib
-
-try:
-    np = importlib.import_module("numpy")
-except ImportError:
-    np = None
-
-try:
-    cv2 = importlib.import_module("cv2")
-except ImportError:
-    cv2 = None
-
+import cv2
+import numpy as np
+from datetime import datetime
+ 
+# ANPR imports - commented out until implementation complete
+# from phenex.anpr.plate_detector import PlateDetector
+# from phenex.anpr.ocr_engine import OCREngine
+# from phenex.anpr.plate_validator import PlateValidator
+ 
+logger = logging.getLogger(__name__)
+ 
 class EventGenerator:
     def __init__(self, line_coords=None, zone_coords=None):
         """
-        line_coords: (x1, y1, x2, y2) - define a line for crossing detection
-        zone_coords: list of (x, y) points - define polygon zone for entry/exit
+        Initialize event generator
+        
+        Args:
+            line_coords: Line crossing coordinates [x1, y1, x2, y2]
+            zone_coords: Zone polygon coordinates [[x1,y1], [x2,y2], ...]
         """
-        # Default geometry; can be overridden by caller-provided coordinates.
-        self.line = line_coords if line_coords is not None else (100, 100, 600, 100)
-        self.zone = zone_coords if zone_coords is not None else [
-            (200, 200), (600, 200), (600, 400), (200, 400)
-        ]
-
-        self.crossed_ids = {}  # {track_id: last_crossing_time}
-        self.zone_ids = {}     # {track_id: currently_in_zone}
+        self.line = line_coords or [100, 100, 600, 100]
+        self.zone = zone_coords or [[200, 200], [600, 200], [600, 400], [200, 400]]
+        
+        self.events = []
+        self.crossed_tracks = set()
+        
+        # ANPR components - commented out until implementation
+        # self.plate_detector = PlateDetector()
+        # self.ocr = OCREngine()
+        # self.plate_validator = PlateValidator()
+        # self.anpr_enabled = True
+        
+        logger.info("✓ Event generator initialized")
     
-    def generate_events(self, tracks):
-        """Generate events from tracks"""
-        events = []
+    def process_frame(self, detections, tracks, frame=None):
+        """
+        Process frame and generate events
         
-        # Check line crossings
-        line_events = self._check_line_crossings(tracks)
-        events.extend(line_events)
+        Args:
+            detections: List of detections from YOLOv8
+            tracks: Dictionary of tracked objects
+            frame: Current frame (optional, for ANPR)
         
-        # Check zone entries/exits
-        zone_events = self._check_zone_events(tracks)
-        events.extend(zone_events)
-        
-        return events
-    
-    def _check_line_crossings(self, tracks):
-        """Detect if any track crossed the line"""
-        events = []
-        current_time = time.time()
+        Returns:
+            List of new events generated
+        """
+        new_events = []
         
         for track_id, track in tracks.items():
-            if len(track['history']) < 2:
+            centroid = track.get('centroid')
+            bbox = track.get('bbox')
+            class_name = track.get('class', 'unknown')
+            confidence = track.get('confidence', 0.0)
+            age = track.get('age', 0)
+            
+            if not centroid:
                 continue
             
-            # Get previous and current position
-            prev_pos = track['history'][-2]
-            curr_pos = track['history'][-1]
+            # Check line crossing
+            if self._line_crossed(track.get('history', []), centroid):
+                event = {
+                    'type': 'line_crossed',
+                    'track_id': track_id,
+                    'class': class_name,
+                    'confidence': confidence,
+                    'timestamp': time.time(),
+                    'position': centroid,
+                    'direction': self._get_direction(track.get('history', [])),
+                    'risk_score': self._calculate_risk(class_name, confidence)
+                }
+                new_events.append(event)
+                logger.info(f"✓ Event: Line crossed by {class_name} (ID: {track_id})")
             
-            # Check if crossed line
-            if self._line_crossed(prev_pos, curr_pos):
-                # Avoid duplicate events (5 second cooldown)
-                if track_id not in self.crossed_ids or \
-                   (current_time - self.crossed_ids[track_id]) > 5:
-                    
-                    direction = self._get_direction(prev_pos, curr_pos)
-                    
-                    events.append({
-                        'type': 'line_crossed',
-                        'track_id': track_id,
-                        'timestamp': current_time,
-                        'confidence': track['confidence'],
-                        'class': track['class'],
-                        'direction': direction,
-                        'risk_score': self._calculate_risk(track)
-                    })
-                    
-                    self.crossed_ids[track_id] = current_time
-        
-        return events
-    
-    def _check_zone_events(self, tracks):
-        """Detect zone entry and exit"""
-        events = []
-        current_time = time.time()
-        
-        for track_id, track in tracks.items():
-            cx, cy = track['centroid']
-            
-            # Check if currently in zone
-            in_zone = self._point_in_polygon((cx, cy), self.zone)
-            was_in_zone = self.zone_ids.get(track_id, False)
-            
-            # Entry event
-            if in_zone and not was_in_zone:
-                events.append({
+            # Check zone entry/exit
+            if self._point_in_zone(centroid):
+                event = {
                     'type': 'zone_entry',
                     'track_id': track_id,
-                    'timestamp': current_time,
-                    'confidence': track['confidence'],
-                    'class': track['class'],
-                    'risk_score': self._calculate_risk(track)
-                })
-            
-            # Exit event
-            if not in_zone and was_in_zone:
-                events.append({
-                    'type': 'zone_exit',
-                    'track_id': track_id,
-                    'timestamp': current_time,
-                    'confidence': track['confidence'],
-                    'class': track['class'],
-                    'risk_score': self._calculate_risk(track)
-                })
-            
-            self.zone_ids[track_id] = in_zone
+                    'class': class_name,
+                    'confidence': confidence,
+                    'timestamp': time.time(),
+                    'position': centroid,
+                    'risk_score': self._calculate_risk(class_name, confidence)
+                }
+                if track_id not in self.crossed_tracks:
+                    new_events.append(event)
+                    self.crossed_tracks.add(track_id)
+                    logger.info(f"✓ Event: Zone entry by {class_name} (ID: {track_id})")
         
-        return events
+        # ANPR processing commented out until implementation
+        # if frame is not None and self.anpr_enabled:
+        #     for track_id, track in tracks.items():
+        #         if track.get('class') in ['car', 'truck', 'bus', 'motorcycle']:
+        #             anpr_result = self.process_anpr(frame, track['bbox'], track_id, track['class'])
+        #             if anpr_result:
+        #                 new_events.append(anpr_result)
+        
+        return new_events
     
-    def _line_crossed(self, p1, p2):
-        """Check if line segment p1-p2 crosses the defined line"""
+    def _line_crossed(self, history, current_point):
+        """
+        Check if object has crossed the line
+        Uses CCW (counter-clockwise) method for accurate line intersection
+        """
+        if len(history) < 1:
+            return False
+        
+        prev_point = history[-1]
         x1, y1, x2, y2 = self.line
-
+        
         def ccw(A, B, C):
-            """Check if points A, B, C are in counter-clockwise order"""
-            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+            return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+        
         line_p1 = (x1, y1)
         line_p2 = (x2, y2)
-
-        return ccw(p1, line_p1, line_p2) != ccw(p2, line_p1, line_p2) and \
-               ccw(p1, p2, line_p1) != ccw(p1, p2, line_p2)
         
-      
-    def _get_direction(self, p1, p2):
-        """Determine crossing direction"""
-        x1, y1 = p1
-        x2, y2 = p2
-        
-        if x2 > x1:
-            return "left_to_right"
-        else:
-            return "right_to_left"
+        return ccw(line_p1, prev_point, current_point) != ccw(line_p2, prev_point, current_point) and \
+               ccw(line_p1, line_p2, prev_point) != ccw(line_p1, line_p2, current_point)
     
-    def _point_in_polygon(self, point, polygon):
-        """Ray casting algorithm for point in polygon"""
+    def _point_in_zone(self, point):
+        """Check if point is inside zone polygon"""
         x, y = point
-        n = len(polygon)
+        n = len(self.zone)
         inside = False
         
-        p1x, p1y = polygon[0]
+        p1x, p1y = self.zone[0]
         for i in range(1, n + 1):
-            p2x, p2y = polygon[i % n]
+            p2x, p2y = self.zone[i % n]
             if y > min(p1y, p2y):
                 if y <= max(p1y, p2y):
                     if x <= max(p1x, p2x):
@@ -157,40 +139,85 @@ class EventGenerator:
         
         return inside
     
-    def _calculate_risk(self, track):
-        """Calculate risk score (0.0 to 1.0)"""
-        score = 0.0
+    def _get_direction(self, history):
+        """Determine direction of movement"""
+        if len(history) < 2:
+            return "unknown"
         
-        # Confidence-based (0.0 to 0.5)
-        score += track['confidence'] * 0.5
+        prev = history[-2]
+        curr = history[-1]
         
-        # Object type (0.0 to 0.2)
-        if track['class'] == 'person':
-            score += 0.1
-        elif track['class'] in ['car', 'truck', 'bus']:
-            score += 0.2
+        dx = curr[0] - prev[0]
+        dy = curr[1] - prev[1]
         
-        return min(score, 1.0)
+        if abs(dx) > abs(dy):
+            return "left_to_right" if dx > 0 else "right_to_left"
+        else:
+            return "top_to_bottom" if dy > 0 else "bottom_to_top"
     
-    def draw_zones_and_lines(self, frame):
-        """Draw zones and lines on frame for visualization"""
-        if cv2 is None:
-            raise RuntimeError(
-                "OpenCV is required for drawing zones and lines. "
-                "Install it with 'pip install opencv-python'."
-            )
-        if np is None:
-            raise RuntimeError(
-                "NumPy is required for drawing zones and lines. "
-                "Install it with 'pip install numpy'."
-            )
-
-        # Draw line
-        x1, y1, x2, y2 = self.line
-        cv2.line(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    def _calculate_risk(self, class_name, confidence):
+        """Calculate risk score based on class and confidence"""
+        base_risk = {
+            'person': 0.3,
+            'car': 0.5,
+            'truck': 0.7,
+            'bus': 0.6,
+            'motorcycle': 0.6,
+            'bicycle': 0.2
+        }
         
-        # Draw zone
-        pts = np.array(self.zone, dtype=np.int32)
-        cv2.polylines(frame, [pts], True, (255, 0, 0), 2)
-        
-        return frame
+        risk = base_risk.get(class_name, 0.4)
+        return min(risk * confidence, 1.0)
+    
+    # ANPR method - commented out until implementation
+    # def process_anpr(self, frame, vehicle_bbox, track_id, class_name):
+    #     """Process ANPR for vehicle"""
+    #     if not self.anpr_enabled:
+    #         return None
+    #     
+    #     try:
+    #         x1, y1, x2, y2 = vehicle_bbox
+    #         vehicle_roi = frame[int(y1):int(y2), int(x1):int(x2)]
+    #         
+    #         if vehicle_roi.size == 0:
+    #             return None
+    #         
+    #         plates = self.plate_detector.detect_plates(vehicle_roi, confidence=0.5)
+    #         if not plates:
+    #             return None
+    #         
+    #         best_plate = max(plates, key=lambda p: p['confidence'])
+    #         plate_crop = self.plate_detector.crop_plate(vehicle_roi, best_plate['bbox'])
+    #         
+    #         if plate_crop is None or plate_crop.size == 0:
+    #             return None
+    #         
+    #         processed_plate = self.plate_detector.preprocess_plate(plate_crop)
+    #         ocr_result = self.ocr.extract_text(processed_plate)
+    #         
+    #         if not ocr_result['text']:
+    #             return None
+    #         
+    #         text = ocr_result['text']
+    #         if not self.plate_validator.validate(text):
+    #             text = self.plate_validator.clean_ocr_text(text)
+    #             if not self.plate_validator.validate(text):
+    #                 return None
+    #         
+    #         normalized = self.plate_validator.normalize(text)
+    #         components = self.plate_validator.extract_components(normalized)
+    #         
+    #         return {
+    #             'type': 'anpr',
+    #             'plate_text': normalized,
+    #             'ocr_confidence': ocr_result['confidence'],
+    #             'plate_confidence': best_plate['confidence'],
+    #             'combined_confidence': (ocr_result['confidence'] + best_plate['confidence']) / 2,
+    #             'track_id': track_id,
+    #             'class': class_name,
+    #             'timestamp': time.time(),
+    #             'components': components
+    #         }
+    #     except Exception as e:
+    #         logger.error(f"ANPR error: {e}")
+    #         return None

@@ -1,184 +1,149 @@
-import importlib
+import cv2
 import time
-import threading
-import asyncio
-import json
+import logging
+from pathlib import Path
+
 from detector import Detector
 from tracker import Tracker
 from events import EventGenerator
 from storage import EventDatabase
 from config import Config
 
-# Load OpenCV dynamically so static analysis does not require the optional
-# cv2 type stubs to be installed in the selected Python environment.
-cv2 = importlib.import_module("cv2")
-
-# Load configuration before making it available to the API module.
-with open("config.json", "r", encoding="utf-8") as f:
-    config = json.load(f)
-
-# Make start time globally available
-import api as api_module
-api_module.pipeline_start_time = time.time()
-api_module.config = config  # Pass config to API
-from api import app, init_db, broadcast_event, update_frame
-
-import logging
-from config import Config
+# Try to import API frame update function
+try:
+    from api import update_frame
+    api_available = True
+except:
+    api_available = False
+    update_frame = None
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('pipeline.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 class PipelineRunner:
-    def __init__(self, video_source=0):  # 0 = webcam
-        self.config = Config('config.json')
-        self.video_source = self.config.get('video_source', video_source)
+    def __init__(self, config_path='config.json'):
+        """Initialize pipeline runner"""
+        self.config = Config(config_path)
+        
+        logger.info("Initializing PheNex detection pipeline...")
+        
         self.detector = Detector()
         self.tracker = Tracker()
-        self.start_time = time.time()
-        self.event_gen = EventGenerator()
-        self.db = EventDatabase('events.db')
-        self.db.add_indexes()
+        self.event_gen = EventGenerator(
+            line_coords=self.config.get('line_coords'),
+            zone_coords=self.config.get('zone_coords')
+        )
+        self.event_db = EventDatabase(self.config.get('database_path', 'events.db'))
         
-        init_db(self.db)
+        # Optimization settings
+        self.detection_interval = self.config.get('detection_interval', 1)
+        self.broadcast_enabled = self.config.get('broadcast_events', True)
         
-        self.running = True
-        self.fps = 0
-        self.frame_count = 0
+        logger.info(f"✓ Pipeline initialized")
+        logger.info(f"  Detection interval: {self.detection_interval}")
+        logger.info(f"  Broadcasting: {'enabled' if self.broadcast_enabled else 'disabled'}")
+        if api_available:
+            logger.info(f"  API frame streaming: enabled")
     
     def run_detection_loop(self):
-            """Main detection loop with error handling"""
-            cap = None
-            reconnect_attempts = 0
-            max_reconnect_attempts = 5
-            self.start_time = time.time()
+        """Main detection loop"""
+        try:
+            cap = cv2.VideoCapture(self.config.get('video_source', 0))
             
-            while self.running:
+            if not cap.isOpened():
+                logger.error("Failed to open video source")
+                return
+            
+            logger.info("✓ Camera connected")
+            
+            # Get frame dimensions
+            width = int(self.config.get('frame_width', 480))
+            height = int(self.config.get('frame_height', 360))
+            logger.info(f"✓ Processing at {width}x{height}")
+            
+            start_time = time.time()
+            frame_count = 0
+            detection_count = 0
+            last_detections = []
+            
+            # Frame skipping
+            detection_interval = self.detection_interval
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    logger.info("Video ended or failed to read frame")
+                    break
+                
                 try:
-                    if cap is None or not cap.isOpened():
-                        print(f"Opening video source: {self.video_source}")
-                        cap = cv2.VideoCapture(self.video_source)
-                        
-                        if not cap.isOpened():
-                            reconnect_attempts += 1
-                            if reconnect_attempts > max_reconnect_attempts:
-                                logger.error("MAX RECONNECTION ATTEMPTS EXCEEDED")
-                                break
-                            
-                            wait_time = min(2 ** reconnect_attempts, 30)  # Exponential backoff
-                            logger.warning(f"Failed to open camera. Retry in {wait_time}s (attempt {reconnect_attempts}/{max_reconnect_attempts})")
-                            time.sleep(wait_time)
-                            continue
-                        
-                        reconnect_attempts = 0  # Reset on successful connection
-                        logger.info("[OK] Camera connected")
+                    # Resize frame
+                    frame_small = cv2.resize(frame, (width, height))
                     
-                    # Read frame with timeout
-                    ret, frame = cap.read()
-                    if not ret:
-                        logger.warning("Failed to read frame, attempting reconnection...")
-                        cap.release()
-                        cap = None
-                        continue
+                    # SEND FRAME TO API FOR VIDEO STREAMING
+                    if api_available and update_frame:
+                        try:
+                            update_frame(frame_small)
+                        except Exception as e:
+                            logger.debug(f"API frame update error: {e}")
                     
-                    # Process frame
-                    try:
-                        detection_interval = 3
-                        frame_count = 0
-                        last_detections = []
-    
-                        width = self.config.get('frame_width', 480)
-                        height = self.config.get('frame_height', 360)
-                        frame_small = cv2.resize(frame, (width, height))
-    
-                        if frame_count % detection_interval == 0:
-                            detections = self.detector.detect(frame_small)
-                            last_detections = detections
-                        else:
-                            detections = last_detections
-                        frame_count += 1
-                        
-                        tracks = self.tracker.update(detections)
-                        events = self.event_gen.generate_events(tracks)
-                        
-                        # Store events
-                        for event in events:
-                            try:
-                                self.db.store_event(event)
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                loop.run_until_complete(broadcast_event(event))
-                            except Exception as e:
-                                logger.error(f"Failed to store event: {e}")
-                        
-                        # Draw and update
-                        frame_small = self.detector.draw_boxes(frame_small, detections)
-                        frame_small = self.tracker.draw_tracks(frame_small, tracks)
-                        frame_small = self.event_gen.draw_zones_and_lines(frame_small)
-                        
-                        self.frame_count += 1
-                        elapsed = time.time() - self.start_time
-                        self.fps = self.frame_count / elapsed
-                        
-                        cv2.putText(frame_small, f"FPS: {self.fps:.1f}", (10, 30),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                        
-                        update_frame(frame_small)
-                        
-                        if self.frame_count % 30 == 0:
-                            stats = self.db.get_stats()
-                            logger.info(f"Frame {self.frame_count} | FPS: {self.fps:.1f} | Tracks: {len(tracks)} | Events: {stats['total_events']}")
-                        
-                        # Periodic cleanup
-                        if self.frame_count % (1800 * 20) == 0:
-                            deleted = self.db.cleanup_old_events(days=7)
-                            logger.info(f"Cleanup: deleted {deleted} old events")
-                        
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
+                    # Frame skipping for detection
+                    if frame_count % detection_interval == 0:
+                        detections = self.detector.detect(frame_small)
+                        last_detections = detections
+                        detection_count += 1
+                    else:
+                        detections = last_detections
                     
-                    except Exception as e:
-                        logger.error(f"Frame processing error: {e}", exc_info=True)
-                        continue
+                    # Update tracker
+                    tracks = self.tracker.update(detections)
+                    
+                    # Generate events
+                    new_events = self.event_gen.process_frame(detections, tracks, frame_small)
+                    
+                    # Store events
+                    for event in new_events:
+                        self.event_db.store_event(event)
+                        if self.broadcast_enabled:
+                            logger.info(f"✓ Event: {event['type']} - {event.get('class', 'unknown')} (ID: {event.get('track_id')})")
+                    
+                    frame_count += 1
+                    
+                    # Log statistics every 30 frames (~3 seconds)
+                    if frame_count % 30 == 0:
+                        elapsed = time.time() - start_time
+                        fps = frame_count / elapsed
+                        stats = self.event_db.get_stats()
+                        logger.info(
+                            f"Frame {frame_count} | "
+                            f"FPS: {fps:.1f} | "
+                            f"Detections: {detection_count} | "
+                            f"Tracks: {len(tracks)} | "
+                            f"Events: {stats.get('total_events', 0)}"
+                        )
                 
                 except Exception as e:
-                    logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                    time.sleep(2)
+                    logger.error(f"Frame processing error: {e}")
+                    continue
             
-            if cap:
-                cap.release()
-            cv2.destroyAllWindows()
-            self.db.close()
-            logger.info("Pipeline stopped")
+            cap.release()
+            logger.info("✓ Camera released")
+        
+        except KeyboardInterrupt:
+            logger.info("Detection loop interrupted by user")
+            cap.release()
+        except Exception as e:
+            logger.error(f"Error in detection loop: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def start_api_server(self):
-        """Start FastAPI server"""
-        import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    def run(self):
+        """Run pipeline"""
+        self.run_detection_loop()
 
-if __name__ == "__main__":
-    print("=" * 50)
-    print("PheNex - AI Video Analytics Platform")
-    print("=" * 50)
-    
-    # Use webcam (0) or video file path
-    runner = PipelineRunner(video_source=config["video_source"])
-    # Start API server in background
-    api_thread = threading.Thread(target=runner.start_api_server, daemon=True)
-    api_thread.start()
-    print("✓ API server starting on http://localhost:8000")
-    
-    time.sleep(2)
-    
-    # Start detection pipeline
-    print("✓ Starting detection pipeline...")
-    runner.run_detection_loop()
-    
+if __name__ == '__main__':
+    runner = PipelineRunner('config.json')
+    runner.run()

@@ -1,5 +1,5 @@
 {
-  "video_source": 0,
+  "video_source": "data/test_cctv1.mp4",
   "line_coords": [100, 100, 600, 100],
   "zone_coords": [[200, 200], [600, 200], [600, 400], [200, 400]],
   "detection_confidence": 0.5,

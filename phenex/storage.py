@@ -1,3 +1,4 @@
+from asyncio.log import logger
 import sqlite3
 import json
 from datetime import datetime
@@ -184,3 +185,70 @@ class EventDatabase:
         if os.path.exists(self.db_path):
             return os.path.getsize(self.db_path) / (1024 * 1024)
         return 0
+
+    def create_anpr_table(self):
+        """Create ANPR results table"""
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS anpr_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER NOT NULL,
+            plate_text TEXT NOT NULL,
+            ocr_confidence REAL,
+            plate_confidence REAL,
+            combined_confidence REAL,
+            vehicle_class TEXT,
+            timestamp REAL,
+            state TEXT,
+            district TEXT,
+            series TEXT,
+            number TEXT,
+            camera_id TEXT,
+            FOREIGN KEY(track_id) REFERENCES events(track_id)
+        )
+    ''')
+        
+        # Create indexes
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_anpr_plate ON anpr_results(plate_text)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_anpr_track ON anpr_results(track_id)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_anpr_timestamp ON anpr_results(timestamp DESC)')
+        
+        self.connection.commit()
+        logger.info("✓ ANPR table created")
+
+    def store_anpr_result(self, anpr_data):
+        """Store ANPR result"""
+        try:
+            self.cursor.execute('''
+                INSERT INTO anpr_results 
+                (track_id, plate_text, ocr_confidence, plate_confidence, combined_confidence, 
+                 vehicle_class, timestamp, state, district, series, number, camera_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                anpr_data['track_id'],
+                anpr_data['plate_text'],
+                anpr_data['ocr_confidence'],
+                anpr_data['plate_detection_confidence'],
+                anpr_data['combined_confidence'],
+                anpr_data['class'],
+                anpr_data['timestamp'],
+                anpr_data['components'].get('state') if anpr_data.get('components') else None,
+                anpr_data['components'].get('district') if anpr_data.get('components') else None,
+                anpr_data['components'].get('series') if anpr_data.get('components') else None,
+                anpr_data['components'].get('number') if anpr_data.get('components') else None,
+                'CAM-01'  # Default camera ID
+            ))
+            self.connection.commit()
+        except Exception as e:
+            logger.error(f"Error storing ANPR result: {e}")
+
+def get_anpr_results(self, limit=50):
+    """Get recent ANPR results"""
+    self.cursor.execute('SELECT * FROM anpr_results ORDER BY timestamp DESC LIMIT ?', (limit,))
+    columns = [desc[0] for desc in self.cursor.description]
+    return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+
+def search_by_plate(self, plate_text):
+    """Search ANPR results by plate text"""
+    self.cursor.execute('SELECT * FROM anpr_results WHERE plate_text = ?', (plate_text,))
+    columns = [desc[0] for desc in self.cursor.description]
+    return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
